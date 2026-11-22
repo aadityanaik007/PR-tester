@@ -14,8 +14,9 @@ to approve.
 - Splits the code under review into functions and classes with Python's `ast` module, and never indexes the reviewer itself.
 - Finds code related to each changed function: callers by name search, similar code by Chroma vector search, top 5 per file.
 - Reviews the diff plus that context with Claude Opus 5.5 through LangChain, returning structured comments.
+- Looks up outside facts when a comment depends on them: PyPI (packages and versions), OSV (known vulnerabilities), Wikipedia (named algorithms and standards).
 - Keeps every comment on a line that appears in the diff, so GitHub can show it inline.
-- Double-checks each comment with a second Claude call, and retries once if every comment was rejected *(in progress)*.
+- Double-checks each comment with a second Claude call that drops vague or unsupported ones, and retries once if every comment was rejected.
 - Posts one GitHub review with an inline comment per finding, or a short "No issues found".
 - Holds the merge for a human's approval whenever a bug is found.
 - `DRY_RUN=true` prints the review instead of posting it.
@@ -38,7 +39,7 @@ to approve.
 │   retrieve       top 5 related chunks/file   ◄── Chroma + ast index    │
 │       │                                          of project/ only      │
 │       ▼                                                                │
-│   reviewer ◄──┐  draft comments              ◄── Claude                │
+│   reviewer ◄──┐  draft comments              ◄── Claude + tools        │
 │       │       │                                                        │
 │       │       │  retry once if every                                   │
 │       ▼       │  comment was rejected                                  │
@@ -82,7 +83,7 @@ Each arrow is a graph edge. Next to each node: the `ReviewState` fields it reads
      │           │
      │           ▼
      │    ┌──────────────┐
-     │    │   verifier   │   reads   draft_comments
+     │    │   verifier   │   reads   files, context, draft_comments
      │    └──────┬───────┘   writes  final_comments, needs_retry
      │           │
      │           ▼
@@ -101,35 +102,44 @@ Each arrow is a graph edge. Next to each node: the `ReviewState` fields it reads
 
 ### ReAct loops and tools
 
-- **No ReAct agent and no tools today.** `reviewer` and `verifier` each make a single
-  Claude call that returns structured output. Claude doesn't call tools or loop by itself.
-- **The only loop is the graph's retry edge** (`verifier` → `reviewer`), which runs at
-  most once.
-- **Planned for v3, not built:** a Wikipedia tool, OSV (open-source vulnerability
-  database) and PyPI (package info). With them, `reviewer` becomes a ReAct loop:
+- **`reviewer` is a ReAct loop.** Claude reasons about the diff, calls a tool when a
+  comment depends on an outside fact, reads the result, and repeats (up to 5 rounds)
+  before returning its structured review. Most reviews need no tools.
+- **`verifier` is a single Claude call** with no tools. It returns a keep or drop verdict
+  for each draft comment.
+- **The graph's retry edge** (`verifier` → `reviewer`) is the only other loop, and runs
+  at most once.
 
 ```text
-reviewer node (v3, planned)
+reviewer node (reviewer/nodes/reviewer.py)
 
   ┌──────────┐  tool call    ┌──────────────────────────┐
-  │  Claude  │ ────────────► │  Wikipedia · OSV · PyPI  │
-  │          │ ◄──────────── │                          │
+  │  Claude  │ ────────────► │  PyPI · OSV · Wikipedia  │
+  │          │ ◄──────────── │   (reviewer/tools.py)    │
   └────┬─────┘  tool result  └──────────────────────────┘
-       │  repeats until Claude has what it needs
+       │  up to 5 rounds; most reviews need none
        ▼
   structured review → draft_comments
 ```
+
+| Tool | Answers |
+|---|---|
+| `pypi_package` | Does this package or version exist? Is it yanked? What's the latest? |
+| `osv_vulnerabilities` | Known CVE/GHSA vulnerabilities for a pinned version, and which versions fix them. |
+| `wikipedia_summary` | The definition of a named algorithm or standard (e.g. Luhn, ISO 4217). |
 
 ### Where things live
 
 | Part | File |
 |---|---|
-| Graph wiring and entry point | `graph.py` |
-| One file per node | `nodes/fetch_diff.py`, `retrieve.py`, `reviewer.py`, `verifier.py`, `post_comment.py` |
-| State passed between nodes | `state.py` |
-| GitHub REST calls | `github_api.py` |
-| Patch parsing and diff line numbers | `diff_utils.py` |
-| Code index (`ast` chunks + Chroma) | `code_index.py` |
-| Claude setup and prompt input | `llm.py` |
-| Target PR and `DRY_RUN` settings | `config.py` |
-| GitHub Actions workflow | `../.github/workflows/pr-review.yml` |
+| Graph wiring and entry point | `reviewer/graph.py` |
+| One file per node | `reviewer/nodes/`: `fetch_diff.py`, `retrieve.py`, `reviewer.py`, `verifier.py`, `post_comment.py` |
+| State passed between nodes | `reviewer/state.py` |
+| Lookup tools (PyPI, OSV, Wikipedia) | `reviewer/tools.py` |
+| GitHub REST calls | `reviewer/github_api.py` |
+| Patch parsing and diff line numbers | `reviewer/diff_utils.py` |
+| Code index (`ast` chunks + Chroma) | `reviewer/code_index.py` |
+| Claude setup and prompt input | `reviewer/llm.py` |
+| Target PR and `DRY_RUN` settings | `reviewer/config.py` |
+| GitHub Actions workflow | `.github/workflows/pr-review.yml` |
+| Code under review (test project) | `project/pr-review-test/` |
