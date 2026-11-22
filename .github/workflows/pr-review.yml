@@ -1,0 +1,48 @@
+# Runs the review agent on every PR: when it's opened, reopened, or gets new commits.
+# Can also be started by hand from the Actions tab with a PR number.
+name: PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+
+# The built-in GITHUB_TOKEN gets just enough access to read code and post the review.
+permissions:
+  contents: read
+  pull-requests: write
+
+# A new push to the same PR cancels the review still running for the old commit.
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: reviewer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Review the PR
+        # --locked: fail if uv.lock is out of date with pyproject.toml, rather than
+        # installing versions nobody tested locally.
+        run: uv run --locked graph.py
+        env:
+          # GITHUB_REPOSITORY is set by Actions automatically.
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_TRACING: "true"
+          LANGSMITH_PROJECT: pr-reviewer
+          DRY_RUN: "false"
