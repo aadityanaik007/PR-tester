@@ -1,5 +1,13 @@
 # Runs the review agent on every PR: when it's opened, reopened, or gets new commits.
 # Can also be started by hand from the Actions tab with a PR number.
+#
+# Two jobs:
+#   review   - Claude reviews the PR and posts its findings as inline comments.
+#              Findings never fail this job; only errors (API failures etc.) do.
+#   approval - runs only if the review reported a bug. It uses the `pr-approval`
+#              environment, which (once you add yourself as a required reviewer in
+#              Settings > Environments) pauses until a human clicks Approve or Reject.
+# Make `review` and `approval` required checks on main so merging waits for both.
 name: PR review
 
 on:
@@ -16,7 +24,7 @@ permissions:
   contents: read
   pull-requests: write
 
-# A new push to the same PR cancels the review still running for the old commit.
+# A new push to the same PR cancels the run (and any pending approval) for the old commit.
 concurrency:
   group: pr-review-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
@@ -25,6 +33,8 @@ jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      bug_count: ${{ steps.agent.outputs.bug_count }}
     defaults:
       run:
         working-directory: reviewer
@@ -34,6 +44,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
 
       - name: Review the PR
+        id: agent
         # --locked: fail if uv.lock is out of date with pyproject.toml, rather than
         # installing versions nobody tested locally.
         run: uv run --locked graph.py
@@ -46,3 +57,13 @@ jobs:
           LANGSMITH_TRACING: "true"
           LANGSMITH_PROJECT: pr-reviewer
           DRY_RUN: "false"
+
+  approval:
+    needs: review
+    # Skipped (which counts as passing) when the review found no bugs.
+    # An empty bug_count also lands here, so a missing output never skips the gate.
+    if: needs.review.outputs.bug_count != '0'
+    runs-on: ubuntu-latest
+    environment: pr-approval
+    steps:
+      - run: echo "Approved by a human despite ${{ needs.review.outputs.bug_count }} bug(s) reported by the review agent."

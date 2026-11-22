@@ -17,7 +17,7 @@ load_dotenv()
 
 from langgraph.graph import END, START, StateGraph  # noqa: E402
 
-from config import get_target  # noqa: E402
+from config import check_can_post, get_target  # noqa: E402
 from nodes import fetch_diff, post_comment, retrieve, reviewer, verifier  # noqa: E402
 from state import ReviewState  # noqa: E402
 
@@ -50,6 +50,7 @@ def build_graph():
 
 if __name__ == "__main__":
     repo, pr_number = get_target()
+    check_can_post()
     app = build_graph()
     # One invoke = one LangSmith trace; the nodes show up as child runs.
     app.invoke(

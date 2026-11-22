@@ -28,20 +28,35 @@ def session() -> requests.Session:
     return s
 
 
+class GitHubError(RuntimeError):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 def check(resp: requests.Response, what: str) -> None:
     """Raise with GitHub's own error message instead of a bare HTTP status."""
     if resp.ok:
         return
     try:
-        detail = resp.json().get("message", resp.text)
+        body = resp.json()
+        detail = body.get("message", resp.text)
+        if errors := body.get("errors"):
+            detail += f" {errors}"
     except ValueError:
         detail = resp.text
     hint = ""
     if resp.status_code == 404:
         hint = " (wrong repo/PR number, or a private repo without a token?)"
-    elif resp.status_code in (401, 403) and not has_token():
-        hint = " (no GITHUB_TOKEN set)"
-    raise RuntimeError(f"GitHub {what} failed: {resp.status_code} {detail}{hint}")
+    elif resp.status_code in (401, 403):
+        hint = " (no GITHUB_TOKEN set)" if not has_token() else " (token lacks 'Pull requests: write'?)"
+    raise GitHubError(f"GitHub {what} failed: {resp.status_code} {detail}{hint}", resp.status_code)
+
+
+def post(s: requests.Session, path: str, payload: dict, what: str) -> dict:
+    resp = s.post(f"{API}{path}", json=payload, timeout=TIMEOUT)
+    check(resp, what)
+    return resp.json()
 
 
 def get_all(s: requests.Session, path: str, what: str) -> list[dict]:
