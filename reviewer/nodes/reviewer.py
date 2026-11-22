@@ -1,13 +1,23 @@
-"""reviewer node: Claude reviews the diff plus retrieved context and returns structured comments."""
+"""reviewer node: Claude reviews the diff plus retrieved context and returns structured comments.
 
+A ReAct loop: Claude may call lookup tools (PyPI, OSV, Wikipedia) and read the results,
+for up to MAX_TOOL_ROUNDS rounds, then answers with the structured review. The review
+format is enforced on every call (output_config.format), so no extra request is needed
+when Claude uses no tools.
+"""
+
+import json
 from typing import Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from pydantic import BaseModel, Field, ValidationError
 
 from diff_utils import commentable_lines
 from llm import chat_model, render_files
 from state import ReviewComment, ReviewState
+from tools import TOOLS, TOOLS_BY_NAME
+
+MAX_TOOL_ROUNDS = 5
 
 SYSTEM = """\
 You review GitHub pull requests. For each changed file you get its diff, with line \
@@ -24,7 +34,12 @@ file, function and line in the issue.
 
 Severity: "bug" breaks or gives wrong results; "warning" is risky or likely wrong; \
 "nit" is minor or style. Only report what the diff and the related code support. \
-If nothing is wrong, return no comments."""
+If nothing is wrong, return no comments.
+
+You have lookup tools for facts the code can't show: whether a package or version exists \
+on PyPI, known vulnerabilities for a pinned version (OSV), and the definition of a named \
+algorithm or standard (Wikipedia). Use them when a comment would depend on such a fact; \
+most reviews need none."""
 
 RETRY_NOTE = """
 
@@ -47,6 +62,41 @@ class ReviewOut(BaseModel):
     comments: list[CommentOut]
 
 
+def run_tool(call: dict) -> ToolMessage:
+    """Run one tool call; any failure goes back to Claude as the tool's result."""
+    tool = TOOLS_BY_NAME.get(call["name"])
+    try:
+        if tool is None:
+            raise ValueError(f"unknown tool {call['name']!r}")
+        msg = tool.invoke(call)  # a ToolCall in -> a ToolMessage out, traced as a tool run
+    except Exception as e:  # noqa: BLE001 - bad arguments etc. are for Claude to fix
+        msg = ToolMessage(content=f"Tool error: {e}", tool_call_id=call["id"], status="error")
+    first_line = str(msg.content).splitlines()[0] if msg.content else ""
+    print(f"  tool {call['name']}({json.dumps(call['args'])}) -> {first_line[:100]}")
+    return msg
+
+
+def run_agent(messages: list[BaseMessage]) -> ReviewOut:
+    """ReAct loop: Claude reasons, optionally calls tools, reads results, then returns the review."""
+    llm = chat_model(effort="high").bind_tools(TOOLS, response_format=ReviewOut)
+    for round_no in range(1, MAX_TOOL_ROUNDS + 2):
+        ai = llm.invoke(messages)
+        messages.append(ai)
+        if not ai.tool_calls:
+            break
+        if round_no > MAX_TOOL_ROUNDS:
+            raise RuntimeError(f"reviewer: still calling tools after {MAX_TOOL_ROUNDS} rounds")
+        messages.extend(run_tool(call) for call in ai.tool_calls)
+        if round_no == MAX_TOOL_ROUNDS:
+            messages.append(HumanMessage("Tool budget used up. Give your final review now, without calling tools."))
+
+    stop = ai.response_metadata.get("stop_reason")
+    try:
+        return ReviewOut.model_validate_json(ai.text)
+    except ValidationError as e:
+        raise RuntimeError(f"reviewer: no structured review (stop_reason={stop}): {e}") from e
+
+
 def reviewer(state: ReviewState) -> dict:
     attempts = state.get("attempts", 0) + 1
     files = state.get("files", [])
@@ -61,12 +111,7 @@ def reviewer(state: ReviewState) -> dict:
         )
         prompt += RETRY_NOTE.format(previous=previous)
 
-    model = chat_model(effort="high").with_structured_output(ReviewOut, method="json_schema", include_raw=True)
-    result = model.invoke([SystemMessage(SYSTEM), HumanMessage(prompt)])
-    review: ReviewOut | None = result["parsed"]
-    if review is None:
-        stop = result["raw"].response_metadata.get("stop_reason")
-        raise RuntimeError(f"reviewer: no structured review (stop_reason={stop}): {result['parsing_error']}")
+    review = run_agent([SystemMessage(SYSTEM), HumanMessage(prompt)])
 
     # GitHub rejects inline comments outside the diff, so drop any that miss.
     allowed = {f["path"]: commentable_lines(f["diff"]) for f in files}
