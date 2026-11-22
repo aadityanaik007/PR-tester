@@ -74,6 +74,10 @@ def print_review(review: dict) -> None:
 
 def post_comment(state: ReviewState) -> dict:
     comments = state.get("final_comments", [])
+    if config.eval_mode():  # evals score the comments from the state; nothing is printed or posted
+        print(f"post_comment: EVAL_MODE, not posting; {len(comments)} final comment(s) left in the state")
+        return {"final_comments": comments}
+
     repo, number = state["repo"], state["pr_number"]
     review = build_review(comments)
 

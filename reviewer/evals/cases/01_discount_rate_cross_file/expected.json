@@ -1,0 +1,20 @@
+{
+  "should_flag": true,
+  "issues": [
+    {
+      "path": "project/pr-review-test/utils.py",
+      "line_range": [
+        4,
+        8
+      ],
+      "keywords": [
+        "calculate_total",
+        "service.py",
+        "percent",
+        "ValueError"
+      ],
+      "severity": "bug",
+      "description": "apply_discount now takes a 0-1 rate, but service.py calculate_total still passes discount_percent unchanged (main.py passes 10), so any discounted order raises ValueError; percentages of 1 or less are silently misapplied."
+    }
+  ]
+}

@@ -39,6 +39,10 @@ def skip_reason(f: dict) -> str | None:
 
 
 def fetch_diff(state: ReviewState) -> dict:
+    if state.get("files") is not None:  # evals pass the diff in directly
+        print(f"fetch_diff: {len(state['files'])} pre-filled file(s), skipping the GitHub API")
+        return {}
+
     repo, number = state["repo"], state["pr_number"]
     with github_api.session() as s:
         raw = github_api.get_all(s, f"/repos/{repo}/pulls/{number}/files", f"listing files of {repo}#{number}")

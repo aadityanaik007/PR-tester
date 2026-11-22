@@ -13,9 +13,14 @@ def dry_run() -> bool:
     return _truthy(os.getenv("DRY_RUN"))
 
 
+def eval_mode() -> bool:
+    """EVAL_MODE=true: post_comment does nothing and leaves the final comments in the state."""
+    return _truthy(os.getenv("EVAL_MODE"))
+
+
 def check_can_post() -> None:
     """Fail at startup, before any LLM spend, if the run would end unable to post."""
-    if not dry_run() and not os.getenv("GITHUB_TOKEN"):
+    if not dry_run() and not eval_mode() and not os.getenv("GITHUB_TOKEN"):
         raise SystemExit("GITHUB_TOKEN is needed to post the review. Set it, or set DRY_RUN=true to print instead.")
 
 

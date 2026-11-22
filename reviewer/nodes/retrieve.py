@@ -5,6 +5,8 @@ excluding the changed file itself. Callers rank first, then mentions (e.g. impor
 then vector hits by distance. Top 5 chunks per changed file.
 """
 
+from pathlib import Path
+
 from code_index import Chunk, CodeIndex
 from diff_utils import changed_symbols, new_side_code
 from state import ReviewState
@@ -20,9 +22,16 @@ def format_chunk(chunk: Chunk, reason: str) -> str:
 
 
 def retrieve(state: ReviewState) -> dict:
-    index = CodeIndex()
+    index_dir = state.get("index_dir")  # evals: a fixture snapshot instead of project/
+    index = CodeIndex(Path(index_dir) if index_dir else None)
     print(f"retrieve: indexed {len(index.chunks)} chunks from {index.root}")
+    try:
+        return {"context": _related_code(state, index)}
+    finally:
+        index.close()
 
+
+def _related_code(state: ReviewState, index: CodeIndex) -> dict[str, list[str]]:
     context: dict[str, list[str]] = {}
     for f in state["files"]:
         path, patch = f["path"], f["diff"]
@@ -48,4 +57,4 @@ def retrieve(state: ReviewState) -> dict:
         print(f"  {path}: changed {sorted(symbols) or '(no def/class found)'}")
         for _, chunk, reason in top:
             print(f"    {chunk.id:<50} {reason}")
-    return {"context": context}
+    return context

@@ -25,3 +25,4 @@ class ReviewState(TypedDict, total=False):
     final_comments: list[ReviewComment]
     needs_retry: bool                  # set by the verifier
     attempts: int                      # how many times the reviewer has run
+    index_dir: str                     # evals only: folder for retrieve to index instead of project/

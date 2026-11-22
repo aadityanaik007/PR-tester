@@ -77,6 +77,55 @@ def new_side_code(patch: str) -> str:
     return "\n".join(ln.text for ln in parse_patch(patch) if ln.kind != "-")
 
 
+HUNK_COUNTS_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def split_unified_diff(text: str) -> list[dict]:
+    """Split a multi-file unified diff (e.g. diff.patch) into [{"path", "diff"}], where each
+    "diff" is hunks only, the same shape as the `patch` field GitHub returns per PR file.
+
+    Hunk bodies are read by the line counts in their @@ header, so a removed line that
+    happens to start with "--" can never be mistaken for a file header.
+    """
+    files: list[dict] = []
+    path: str | None = None
+    hunks: list[str] = []
+    old_left = new_left = 0
+    lines = text.splitlines()
+
+    def flush() -> None:
+        if path and hunks:
+            files.append({"path": path, "diff": "\n".join(hunks)})
+
+    for i, line in enumerate(lines):
+        if old_left > 0 or new_left > 0:  # inside a hunk body
+            hunks.append(line)
+            tag = line[:1]
+            if tag == "-":
+                old_left -= 1
+            elif tag == "+":
+                new_left -= 1
+            elif tag != "\\":  # context line (or an empty one with its space stripped)
+                old_left -= 1
+                new_left -= 1
+            continue
+        if line.startswith("\\") and hunks:  # "\ No newline at end of file" after a hunk
+            hunks.append(line)
+        elif m := HUNK_COUNTS_RE.match(line):
+            hunks.append(line)
+            old_left = int(m[1]) if m[1] is not None else 1
+            new_left = int(m[2]) if m[2] is not None else 1
+        elif line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            flush()
+            hunks = []
+            old, new = line[4:].split("\t")[0], lines[i + 1][4:].split("\t")[0]
+            target = new if new != "/dev/null" else old  # a deleted file keeps its old path
+            path = target[2:] if target.startswith(("a/", "b/")) else target
+        # anything else ("diff --git", "index ...", the "+++" header line) is metadata
+    flush()
+    return files
+
+
 def commentable_lines(patch: str) -> set[int]:
     """New-side line numbers GitHub accepts an inline comment on: added and context lines."""
     return {ln.new_no for ln in parse_patch(patch) if ln.new_no is not None}

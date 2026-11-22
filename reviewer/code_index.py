@@ -1,12 +1,15 @@
 """Chunk the project under review into functions/classes with ast and index them in Chroma.
 
-Only project/ is indexed (override with PROJECT_DIR); reviewer/ is always excluded.
-The index lives in memory and is rebuilt every run, so it can never be stale.
+By default only project/ is indexed (override with PROJECT_DIR), with paths relative to the
+repo root; reviewer/ is always excluded. Evals pass an explicit root (a fixture snapshot),
+whose paths are relative to that root. The index lives in memory and is rebuilt every run,
+in its own collection, so it can never be stale or mix up two runs in one process.
 """
 
 import ast
 import os
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,11 +57,11 @@ def _span(node: ast.AST) -> range:
     return range(start, node.end_lineno + 1)
 
 
-def chunk_file(path: Path) -> list[Chunk]:
+def chunk_file(path: Path, base: Path = REPO_ROOT) -> list[Chunk]:
     """One chunk per top-level function, per method, per class body (minus its methods),
     plus one <module> chunk for whatever is left (imports, constants, __main__ block)."""
     source = path.read_text(encoding="utf-8")
-    rel = path.relative_to(REPO_ROOT).as_posix()
+    rel = path.relative_to(base).as_posix()
     text = source.splitlines()
     numbered = lambda rng: [(n, text[n - 1]) for n in rng if text[n - 1].strip()]  # noqa: E731
 
@@ -93,22 +96,32 @@ def chunk_file(path: Path) -> list[Chunk]:
 
 
 def python_files(root: Path):
+    # Never index the reviewer's own code, even if PROJECT_DIR points at the repo root.
+    # An eval fixture snapshot lives under reviewer/evals/, so it is allowed when it is the root.
+    root_is_fixture = root.is_relative_to(REVIEWER_DIR)
     for p in sorted(root.rglob("*.py")):
-        if SKIP_DIRS.intersection(p.parts) or p.is_relative_to(REVIEWER_DIR):
-            continue  # never index the reviewer itself, even if PROJECT_DIR points at the repo root
+        if SKIP_DIRS.intersection(p.relative_to(root).parts):
+            continue
+        if p.is_relative_to(REVIEWER_DIR) and not root_is_fixture:
+            continue
         yield p
 
 
 class CodeIndex:
     def __init__(self, root: Path | None = None):
-        self.root = root or project_dir()
-        self.chunks = [c for f in python_files(self.root) for c in chunk_file(f)]
+        if root is None:  # normal runs: project/, paths like "project/pr-review-test/utils.py"
+            self.root, base = project_dir(), REPO_ROOT
+        else:  # evals: a fixture snapshot that mirrors the repo layout, so paths come out the same
+            self.root = base = Path(root).resolve()
+        self.chunks = [c for f in python_files(self.root) for c in chunk_file(f, base)]
         self.by_id = {c.id: c for c in self.chunks}
 
-        client = chromadb.EphemeralClient(settings=Settings(anonymized_telemetry=False))
+        self._client = chromadb.EphemeralClient(settings=Settings(anonymized_telemetry=False))
+        # Ephemeral clients share one in-memory store per process, so give every index its own
+        # collection; otherwise two eval cases with the same file names would overwrite each other.
         # Chroma's default embedding function: all-MiniLM-L6-v2 via ONNX, runs locally.
-        self.collection = client.get_or_create_collection(
-            "code_chunks", configuration={"hnsw": {"space": "cosine"}}
+        self.collection = self._client.create_collection(
+            f"code_chunks_{uuid.uuid4().hex[:12]}", configuration={"hnsw": {"space": "cosine"}}
         )
         if self.chunks:
             self.collection.upsert(
@@ -119,6 +132,10 @@ class CodeIndex:
                     for c in self.chunks
                 ],
             )
+
+    def close(self) -> None:
+        """Drop this index's collection from the process-wide in-memory store."""
+        self._client.delete_collection(self.collection.name)
 
     def similar(self, code: str, exclude_path: str, k: int = 10) -> list[tuple[Chunk, float]]:
         """Vector search: chunks most similar to `code`, outside `exclude_path`, with cosine distance."""
