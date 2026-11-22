@@ -1,4 +1,5 @@
 chromadb
+langchain-anthropic
 langgraph
 langsmith
 python-dotenv

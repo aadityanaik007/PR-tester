@@ -75,3 +75,27 @@ def changed_symbols(patch: str) -> dict[str, str]:
 def new_side_code(patch: str) -> str:
     """All context + added lines, for files where no def/class could be identified."""
     return "\n".join(ln.text for ln in parse_patch(patch) if ln.kind != "-")
+
+
+def commentable_lines(patch: str) -> set[int]:
+    """New-side line numbers GitHub accepts an inline comment on: added and context lines."""
+    return {ln.new_no for ln in parse_patch(patch) if ln.new_no is not None}
+
+
+def annotate(patch: str) -> str:
+    """The patch with each added/context line prefixed by its line number in the new file.
+
+    Removed lines and hunk headers get no number: they can't take an inline comment.
+    """
+    out: list[str] = []
+    new_no = 0
+    for raw in patch.splitlines():
+        if m := HUNK_RE.match(raw):
+            new_no = int(m[2])
+            out.append(f"     {raw}")
+        elif raw.startswith(("+", " ")):
+            out.append(f"{new_no:>4} {raw}")
+            new_no += 1
+        else:  # removed line or "\ No newline at end of file"
+            out.append(f"     {raw}")
+    return "\n".join(out)
