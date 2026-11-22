@@ -1,11 +1,11 @@
 """Small helper functions used by the order service."""
 
 
-def apply_discount(amount: float, percent: float) -> float:
-    """Apply a percentage discount. percent=10 means 10% off."""
-    if percent < 0 or percent > 100:
-        raise ValueError("percent must be between 0 and 100")
-    return round(amount * (1 - percent / 100), 2)
+def apply_discount(amount: float, rate: float) -> float:
+    """Apply a discount rate. rate=0.1 means 10% off."""
+    if rate < 0 or rate > 1:
+        raise ValueError("rate must be between 0 and 1")
+    return round(amount * (1 - rate), 2)
 
 
 def calculate_tax(amount: float, rate: float = 0.08) -> float:
